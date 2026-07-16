@@ -55,6 +55,31 @@ Consecuencia para la migración 001 y cualquier rotación posterior:
   '...'` (sin repetir `NOSUPERUSER`/`NOBYPASSRLS` en el mismo `ALTER` —
   Postgres lo rechaza viniendo de un `postgres` no-superuser).
 
+## Los tenants NUNCA se borran físicamente
+
+`tenants.status` incluye `suspended` precisamente para esto: dar de baja un
+tenant es un `UPDATE status='suspended'`, nunca un `DELETE`. Esto está
+reforzado en tres capas independientes (defensa en profundidad, no una
+sola comprobación):
+
+1. `app_backend` no tiene privilegio `DELETE` sobre `tenants` (el `GRANT`
+   solo da `SELECT, INSERT, UPDATE`) — el backend no puede ni intentarlo.
+2. Un trigger `BEFORE DELETE` dedicado (`reject_tenant_delete`) rechaza
+   cualquier `DELETE FROM tenants` incondicionalmente, venga de quien venga.
+3. Aun sin las dos anteriores, `tenant_id` en cascada (`ON DELETE CASCADE`)
+   más los triggers de inmutabilidad de `ledger_entries`/`audit_events`
+   also bloquean el borrado **en cuanto el tenant tiene alguna fila en esas
+   dos tablas** — el intento de cascada choca con el trigger de
+   inmutabilidad y aborta toda la transacción.
+
+**Por qué existen las tres capas y no basta con la (3):** se comprobó en
+vivo que un tenant recién creado, sin ninguna fila todavía en
+`ledger_entries` ni `audit_events`, **sí se borra físicamente sin
+problema** por esa vía — el cascade no encuentra nada que lo bloquee. La
+protección "incidental" de la capa 3 no es una garantía real por sí sola;
+la capa 2 (trigger dedicado en `tenants`) es la que hace la regla
+universal, independientemente de la actividad que tenga el tenant.
+
 ## Identidad y tenancy
 ```sql
 tenants [global]

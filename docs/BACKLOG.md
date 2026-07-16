@@ -42,10 +42,22 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       limpio contra `DATABASE_URL_ADMIN`, `npm run typecheck`/`build` limpios,
       `/health` responde `{"status":"ok","supabase":"connected"}` con conexión real.
       `DATABASE_URL` del backend usa `app_backend` vía pooler (modo transaction).
-- [ ] **S1-2 · Migración 001.** TODO el esquema de @docs/MODELO_DATOS.md aunque haya
+- [x] **S1-2 · Migración 001.** TODO el esquema de @docs/MODELO_DATOS.md aunque haya
       tablas sin UI todavía. RLS en toda tabla tenant-scoped. Triggers de inmutabilidad
       en ledger_entries y audit_events. Seed: providers + models + exchange_rates demo.
       AC: test que intenta UPDATE/DELETE en ledger y audit_events y comprueba que falla.
+      Verificado: `alembic upgrade head` y `downgrade base` limpios contra Supabase (21
+      tablas, 16 políticas RLS con la plantilla `CASE WHEN`, 2 triggers de inmutabilidad),
+      seed cargado (3 providers, 3 models, 6 exchange_rates), `pytest` en verde incluyendo
+      `test_immutability.py` (UPDATE/DELETE fallan en ledger_entries y audit_events, hasta
+      conectando como `postgres`), y smoke test de RLS real en `users`. `app_backend` se
+      gestiona de forma idempotente (create-if-not-exists, nunca DROP+CREATE).
+      **Endurecido tras revisión**: el cascade `tenant_id` + triggers de ledger/audit
+      solo bloqueaban el borrado físico de un tenant SI ya tenía filas ahí (comprobado:
+      un tenant sin actividad SÍ se borraba). Añadido trigger dedicado `reject_tenant_delete`
+      (bloquea DELETE en `tenants` siempre, no toca UPDATE) + `app_backend` sin grant de
+      DELETE en `tenants` — tres capas independientes, ver `docs/MODELO_DATOS.md`. Cubierto
+      por `test_tenant_hard_delete.py` (incluye el caso límite sin filas hijas).
 - [ ] **S1-3 · Test cross-tenant en CI.** `tests/test_rls.py`: crea 2 tenants, inserta
       datos en cada uno, verifica que con `app.tenant_id` del tenant A no se lee NADA
       del B en ninguna tabla tenant-scoped (introspección de tablas: si aparece una
