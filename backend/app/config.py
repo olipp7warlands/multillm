@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     database_url: str
     supabase_url: str
     supabase_jwt_secret: str
+    app_master_key: str
     base_domain: str = "lvh.me"
 
 

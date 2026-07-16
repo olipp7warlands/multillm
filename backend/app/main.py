@@ -13,6 +13,12 @@ from app.services.auth import (
     register_tenant,
     require_role,
 )
+from app.services.onboarding import (
+    complete_onboarding,
+    enable_models,
+    set_dlp_preset,
+    validate_and_store_key,
+)
 from app.services.tenant_resolver import (
     TenantNotFoundError,
     TenantSuspendedError,
@@ -111,3 +117,65 @@ async def login_endpoint(current_user: CurrentUser = Depends(get_current_user)):
 async def admin_ping(current_user: CurrentUser = Depends(require_role("owner", "admin"))):
     """Endpoint mínimo para demostrar/probar el middleware de roles."""
     return {"ok": True, "role": current_user.role}
+
+
+# --- Onboarding wizard (S1-6) — solo el owner que dio de alta el tenant ---
+
+
+class ValidateKeyRequest(BaseModel):
+    provider_slug: str
+    api_key: str
+
+
+@app.post("/api/onboarding/validate-key")
+async def validate_key_endpoint(
+    payload: ValidateKeyRequest,
+    current_user: CurrentUser = Depends(require_role("owner")),
+):
+    """Llamada de test real al proveedor; la key se cifra SIEMPRE antes de
+    guardarse (regla 3, CLAUDE.md) — nunca se devuelve ni se loguea entera."""
+    result = await validate_and_store_key(
+        tenant_id=current_user.tenant_id,
+        provider_slug=payload.provider_slug,
+        api_key=payload.api_key,
+        created_by=current_user.id,
+    )
+    return {"status": result.status, "key_last4": result.key_last4}
+
+
+class EnableModelsRequest(BaseModel):
+    model_ids: list[str]
+
+
+@app.post("/api/onboarding/enable-models")
+async def enable_models_endpoint(
+    payload: EnableModelsRequest,
+    current_user: CurrentUser = Depends(require_role("owner")),
+):
+    await enable_models(tenant_id=current_user.tenant_id, model_ids=payload.model_ids)
+    return {"enabled": payload.model_ids}
+
+
+class DlpPresetRequest(BaseModel):
+    preset: str  # strict|balanced|warn_only
+
+
+@app.post("/api/onboarding/dlp-preset")
+async def dlp_preset_endpoint(
+    payload: DlpPresetRequest,
+    current_user: CurrentUser = Depends(require_role("owner")),
+):
+    mode = await set_dlp_preset(tenant_id=current_user.tenant_id, preset=payload.preset)
+    return {"mode": mode}
+
+
+@app.post("/api/onboarding/complete")
+async def complete_onboarding_endpoint(
+    current_user: CurrentUser = Depends(require_role("owner")),
+):
+    await complete_onboarding(
+        tenant_id=current_user.tenant_id,
+        actor_user_id=current_user.id,
+        actor_role=current_user.role,
+    )
+    return {"completed": True}

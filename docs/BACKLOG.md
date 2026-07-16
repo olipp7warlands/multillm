@@ -99,10 +99,17 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       contra Supabase real, hasta el punto en que el rate limit de email de la
       cuenta lo permitió (confirma que el signup real activa el flujo de
       confirmación por email, que la página ya contempla).
-- [ ] **S1-6 · Onboarding wizard (backend).** Endpoints: validate-key (llamada de test
+- [x] **S1-6 · Onboarding wizard (backend).** Endpoints: validate-key (llamada de test
       real al proveedor, persiste cifrada si válida — envelope encryption D2),
       enable-models (camino reseller), dlp-preset (Estricto|Equilibrado|Solo avisar),
       complete. AC: key inválida → status invalid y NO se persiste en claro jamás.
+      Cifrado en `app/services/gateway` (Fernet sobre `APP_MASTER_KEY`) — `onboarding`
+      solo cifra, nunca descifra (regla 3, CLAUDE.md); `decrypt_provider_key` queda
+      reservado para GatewayService (S1-10). Verificado con una llamada de test real
+      (`ANTHROPIC_API_KEY` de SP-1) y con una key inválida: en AMBOS casos se cifra
+      antes de guardar — confirmado que los bytes en `provider_connections.encrypted_key`
+      nunca contienen el texto plano, con round-trip de descifrado correcto. DLP preset
+      mapea Estricto→block, Equilibrado→mask, Solo avisar→warn. 23/23 tests en verde.
 - [ ] **S1-7 · Onboarding wizard (frontend).** 4 pasos: espacio (nombre, slug, logo,
       color) → modelos (bifurcación BYOK con check verde animado al validar / catálogo
       reseller con precios en créditos) → preset DLP → invitar equipo (emails,
@@ -176,6 +183,11 @@ cliente → coste en créditos bajo la respuesta.
       balance_cached) y limpieza de holds expirados (cron de Railway o job interno),
       rate limits afinados, headers de seguridad, test de que ninguna key aparece en
       logs, y despliegue completo en Railway (backend + frontend) con dominio wildcard.
+      **Reactivar "Confirm email" en Supabase Auth + configurar SMTP propio antes de
+      usuarios reales** — se desactivó temporalmente en S1-5 solo para poder probar el
+      ciclo signup→login en desarrollo (el proveedor de email por defecto de Supabase
+      tiene un rate limit muy bajo, confirmado en vivo: bloqueó varios signups de
+      prueba seguidos incluso con "Confirm email" ya desactivado).
 
 **Demo fin S2 (= demo de venta):** onboarding con marca del cliente → empleados
 invitados chateando bajo presupuesto de división → admin audita a una persona
