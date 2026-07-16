@@ -34,6 +34,14 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# el engine async de SQLAlchemy es un singleton de proceso (app/db.py) atado
+# al loop en el que se crearon sus conexiones pooled; con el scope por
+# defecto (function) pytest-asyncio crea un loop nuevo por test y las
+# conexiones quedan huérfanas de un loop distinto ("cannot perform
+# operation: another operation is in progress" al reusar el pool entre
+# tests). Un loop de sesión evita el problema.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
 
 [tool.ruff]
 line-length = 100

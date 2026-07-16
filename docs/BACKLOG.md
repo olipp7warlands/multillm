@@ -67,9 +67,19 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       conexión de `app_backend`. Cubre también el caso sin `app.tenant_id` (0 filas,
       sin error). Todo en una transacción revertida al final — no hay que lidiar con
       el borrado bloqueado de tenants ni con basura en ledger/audit inmutables.
-- [ ] **S1-4 · TenantResolver + sesión RLS.** Middleware: subdominio → tenant (404 si
+- [x] **S1-4 · TenantResolver + sesión RLS.** Middleware: subdominio → tenant (404 si
       no existe, 403 si suspended); `SET LOCAL app.tenant_id` por transacción;
       branding+settings en cache de memoria del proceso con invalidación por versión.
+      `app/services/tenant_resolver/`: resuelve por `custom_domain` o `slug.BASE_DOMAIN`,
+      cachea tenant+branding en memoria (TTL 60s + invalidación explícita por
+      `tenant_id`, no por host/slug — hay que llamarla tras cualquier UPDATE de
+      tenants/tenant_branding). Usa `tenant_session()` para leer `tenant_branding`
+      (tiene RLS); `/health` no pasa por el middleware. Verificado con 4 tests +
+      smoke test end-to-end contra `uvicorn` real (404 / 403 / 200 con host real).
+      De paso, corregido un bug real de `pytest-asyncio`: el engine async de
+      SQLAlchemy es un singleton de proceso, pero el scope de loop por defecto
+      (`function`) le hacía perder el event loop entre tests — fijado a `session`
+      en `pyproject.toml`.
 
 ### Auth y onboarding
 - [ ] **S1-5 · Auth con Supabase.** Frontend usa Supabase Auth (email/password +
