@@ -58,10 +58,15 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       (bloquea DELETE en `tenants` siempre, no toca UPDATE) + `app_backend` sin grant de
       DELETE en `tenants` — tres capas independientes, ver `docs/MODELO_DATOS.md`. Cubierto
       por `test_tenant_hard_delete.py` (incluye el caso límite sin filas hijas).
-- [ ] **S1-3 · Test cross-tenant en CI.** `tests/test_rls.py`: crea 2 tenants, inserta
+- [x] **S1-3 · Test cross-tenant en CI.** `tests/test_rls.py`: crea 2 tenants, inserta
       datos en cada uno, verifica que con `app.tenant_id` del tenant A no se lee NADA
       del B en ninguna tabla tenant-scoped (introspección de tablas: si aparece una
       tabla nueva sin política, el test falla en rojo).
+      Introspección real vía `information_schema`/`pg_policies` (no una lista fija) +
+      2 tenants reales con fila propia en las 16 tablas tenant-scoped, todo por la
+      conexión de `app_backend`. Cubre también el caso sin `app.tenant_id` (0 filas,
+      sin error). Todo en una transacción revertida al final — no hay que lidiar con
+      el borrado bloqueado de tenants ni con basura en ledger/audit inmutables.
 - [ ] **S1-4 · TenantResolver + sesión RLS.** Middleware: subdominio → tenant (404 si
       no existe, 403 si suspended); `SET LOCAL app.tenant_id` por transacción;
       branding+settings en cache de memoria del proceso con invalidación por versión.
