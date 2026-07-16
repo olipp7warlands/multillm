@@ -2,10 +2,58 @@
 
 Reglas globales:
 - Toda tabla tenant-scoped: `tenant_id UUID NOT NULL` + índice + política RLS
-  `USING (tenant_id = current_setting('app.tenant_id')::uuid)`.
+  con la plantilla canónica `CASE WHEN` (ver sección abajo) — **la forma
+  ingenua `USING (tenant_id = current_setting('app.tenant_id')::uuid)` queda
+  PROHIBIDA**, no es solo un ejemplo simplificado.
 - Tablas marcadas **[global]** no llevan RLS de tenant (catálogo y operador).
 - `ledger_entries` y `audit_events`: trigger que rechaza UPDATE y DELETE.
 - PKs: UUID v7 (orden temporal). Timestamps: `timestamptz`, UTC.
+
+## Plantilla canónica de política RLS (obligatoria, verificada en SP-3)
+
+Entre transacciones, el pooler de Supabase deja el GUC custom `app.tenant_id`
+en `''` (cadena vacía) en vez de `NULL` — y Postgres NO garantiza el orden de
+evaluación de un `AND`, así que un guard tipo `AND current_setting(...) <> ''`
+antes del cast **no protege** del cast inseguro. La única forma que garantiza
+el orden es un `CASE WHEN`. Toda tabla tenant-scoped usa esta plantilla,
+sustituyendo `<tabla>`:
+
+```sql
+ALTER TABLE <tabla> ENABLE ROW LEVEL SECURITY;
+ALTER TABLE <tabla> FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tenant_isolation ON <tabla>
+USING (
+    tenant_id = (
+        CASE
+            WHEN current_setting('app.tenant_id', true) IS NULL
+                 OR current_setting('app.tenant_id', true) = ''
+            THEN NULL
+            ELSE current_setting('app.tenant_id', true)::uuid
+        END
+    )
+);
+```
+
+Sin `SET LOCAL app.tenant_id` dentro de la transacción → 0 filas, sin error
+(nunca `InvalidTextRepresentationError`). Detalle y repro en `docs/spike.md`
+(SP-3, Hallazgo 4).
+
+## Gestión del rol `app_backend` (limitación de Supabase, ver SP-3)
+
+El `postgres` de Supabase **no es superuser real** (`rolsuper=false`, solo
+`rolbypassrls=true` + `CREATEROLE`). Con Postgres 16+ esto significa que
+`postgres` puede `CREATE ROLE app_backend ... NOSUPERUSER NOBYPASSRLS` una
+única vez, pero **no puede** volver a tocar esos atributos en un `ALTER ROLE`
+posterior (ni siquiera como no-op) ni hacer `DROP ROLE`/`DROP OWNED BY` sobre
+un rol que no posee como miembro, aunque lo haya creado él mismo.
+Consecuencia para la migración 001 y cualquier rotación posterior:
+- Crear `app_backend` con `CREATE ROLE ... IF NOT EXISTS`-equivalente
+  (comprobar existencia antes con `SELECT 1 FROM pg_roles`, no un `DROP`+
+  `CREATE`) fijando `NOSUPERUSER NOBYPASSRLS` en ese único `CREATE`.
+- Rotaciones de password: **solo** `ALTER ROLE app_backend WITH PASSWORD
+  '...'` (sin repetir `NOSUPERUSER`/`NOBYPASSRLS` en el mismo `ALTER` —
+  Postgres lo rechaza viniendo de un `postgres` no-superuser).
 
 ## Identidad y tenancy
 ```sql

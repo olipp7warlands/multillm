@@ -172,9 +172,155 @@ recognizer de `deny_list` de forma no lineal.
 
 ---
 
-## SP-3 · Supabase RLS + pooler — **pendiente**
+## SP-3 · Supabase RLS + pooler — **completo**
 
-No iniciado. Bloqueado a la espera de que el usuario cree el proyecto
-Supabase y añada `DATABASE_URL` (pooler, rol `app_backend` sin bypassrls),
-`SUPABASE_URL` y `SUPABASE_JWT_SECRET` a `.env`. Se ejecuta al final,
-según lo acordado.
+### Setup
+Rol `app_backend` (`NOSUPERUSER NOBYPASSRLS`) creado por SQL contra el
+proyecto Supabase real. Tabla `spike_rls_test` (`tenant_id uuid`, `note`)
+con `ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` y una política
+por `current_setting('app.tenant_id')`. Verificado con `asyncpg`
+(`statement_cache_size=0`) desde un script en un venv aislado, insertando
+una fila de un tenant A y otra de un tenant B.
+
+### Hallazgo 1 — el host de conexión directa es IPv6-only
+`db.<ref>.supabase.co` solo resuelve a una dirección IPv6
+(`2a05:d01c:...`); esta máquina/red no tiene ruta IPv6 y `getaddrinfo`
+falla, aunque el DNS en sí resuelve bien (confirmado con `nslookup`, que sí
+mostró la IP). La conexión de superusuario para el DDL del paso 1 se hizo
+en su lugar a través del **mismo host del pooler** (que sí resuelve IPv4)
+usando `postgres.<ref>` como usuario — Supabase soporta cualquier rol vía
+pooler con ese formato. **Implicación para despliegue**: si Railway (o el
+entorno que sea) no tiene salida IPv6, la app NUNCA debe depender del host
+de conexión directa — solo del pooler. Esto ya era la decisión de D4/regla 6
+del CLAUDE.md; este hallazgo la confirma con un motivo concreto y
+reproducible, no solo como buena práctica.
+
+### Hallazgo 2 — límites de `postgres` como CREATEROLE no-superuser (PG16+)
+El `postgres` de Supabase **no es superuser real** (`rolsuper=false`,
+`rolbypassrls=true` — confirmado por query directa). Con Postgres 16+, un
+rol con `CREATEROLE` pero sin `SUPERUSER`:
+- SÍ puede `CREATE ROLE ... NOSUPERUSER NOBYPASSRLS` (crear un rol nuevo).
+- NO puede incluir `NOSUPERUSER`/`NOBYPASSRLS` en un `ALTER ROLE` posterior
+  sobre ese mismo rol, aunque sea un no-op — Postgres exige ser superuser
+  real para tocar esos atributos en un `ALTER`, incluso en la dirección "no".
+- NO puede `DROP OWNED BY`/`DROP ROLE` sobre un rol que no posee como
+  miembro, aunque lo haya creado él mismo (`permission denied to drop
+  objects... only roles with privileges of role "app_backend"...`).
+
+**Consecuencia práctica para S1-2**: la migración que crea `app_backend` debe
+hacerlo con `CREATE ROLE` (fijando los atributos ahí, una sola vez) y tratarlo
+como esencialmente permanente — rotar su password con `ALTER ROLE ... PASSWORD`
+(sin tocar atributos) en vez de asumir que se puede recrear libremente desde
+una migración idempotente basada en DROP/CREATE.
+
+### Hallazgo 3 — tras rotar la password, la autenticación vía pooler falla
+de forma transitoria (en AMBOS modos, no solo uno)
+Justo después de `ALTER ROLE app_backend PASSWORD '...'`, el primer intento
+de conectar como `app_backend` a través del pooler (tanto en modo session
+como en modo transaction) falla con `password authentication failed`,
+incluso con la contraseña correcta recién verificada, sin relación con
+caracteres especiales, formato de usuario (`app_backend.<ref>`, confirmado
+necesario — sin el sufijo de proyecto el pooler responde
+`no tenant identifier provided`) ni con `rolcanlogin`. Un **reintento con
+un pequeño backoff (unos segundos) resuelve la conexión de forma fiable**
+— parece una ventana de sincronización de credenciales del pooler
+(Supavisor), no un bloqueo permanente ni específico de un modo de pooling.
+**Regla práctica para el backend**: la capa de conexión debe reintentar en
+`InvalidPasswordError` con backoff corto tras cualquier rotación de
+password de `app_backend`, en vez de asumir que el cambio es instantáneo.
+
+### Hallazgo 4 — CRÍTICO: entre transacciones, el pooler deja el GUC
+custom en `''` (cadena vacía), no en `NULL`
+Con una política ingenua (`USING (tenant_id = current_setting('app.tenant_id',
+true)::uuid)`), reproducido en un repro mínimo de 3 líneas:
+- Transacción nueva, nunca se ha tocado `app.tenant_id` → `current_setting(...,
+  true)` = `None` (correcto).
+- Dentro de una transacción, tras `set_config('app.tenant_id', 'X', true)` →
+  `current_setting(...)` = `'X'` (correcto, SET LOCAL aplicado).
+- **Una transacción NUEVA después de que la anterior hiciera commit** (mismo
+  `asyncpg.Connection`, vía el pooler) → `current_setting(..., true)` = `''`
+  (cadena vacía), **no** `None`. Esto no es el comportamiento de una sesión
+  Postgres normal (donde `SET LOCAL` se deshace automáticamente al cerrar la
+  transacción, volviendo a "no definido"); apunta a que el pooler de Supabase
+  hace algún tipo de limpieza de GUCs custom al reciclar la conexión entre
+  transacciones, dejándolos en `''` en vez de indefinidos.
+
+**Por qué importa**: `''::uuid` lanza `InvalidTextRepresentationError` en vez
+de simplemente no matchear ninguna fila. Con la política ingenua, cualquier
+código que olvide el `SET LOCAL app.tenant_id` al principio de una
+transacción **no falla de forma segura con "0 filas" — lanza un error de
+Postgres** (falla ruidoso, que es preferible a una fuga silenciosa, pero
+rompe la query en vez de simplemente no devolver datos).
+
+**Segundo gotcha, más sutil**: la corrección obvia —
+`AND current_setting(...) <> ''` antes del cast — **no funciona**. Postgres
+NO garantiza el orden de evaluación de los operandos de un `AND` (es un
+punto documentado de las propias FAQ de Postgres); el intento de cast a
+`uuid` se puede seguir disparando aunque el guard anterior sea falso. La
+única forma correcta de garantizar el orden es un `CASE WHEN`:
+
+```sql
+USING (
+    tenant_id = (
+        CASE
+            WHEN current_setting('app.tenant_id', true) IS NULL
+                 OR current_setting('app.tenant_id', true) = ''
+            THEN NULL
+            ELSE current_setting('app.tenant_id', true)::uuid
+        END
+    )
+)
+```
+
+Con este `CASE`, verificado en los 4 escenarios (sin `SET LOCAL`; tenant A;
+nueva transacción sin `SET LOCAL` tras la de A; tenant B) en **ambos modos
+del pooler**: aísla correctamente, cero filas cuando no hay tenant en
+contexto, cero fugas cruzadas, sin errores.
+
+**Regla obligatoria para S1-2**: TODA política RLS de AIhub que use
+`current_setting('app.tenant_id')` debe usar esta forma con `CASE WHEN`, no
+la forma ingenua con `AND`/cast directo — de lo contrario cualquier request
+que reutilice una conexión pooled tras una transacción anterior puede
+lanzar un 500 en vez de devolver "sin acceso".
+
+### Verificación de aislamiento — resultado final (ambos modos)
+| Escenario | Modo session (5432) | Modo transaction (6543) |
+|---|---|---|
+| Sin `SET LOCAL` | 0 filas ✓ | 0 filas ✓ |
+| `SET LOCAL` tenant A | 1 fila, sin fuga de B ✓ | 1 fila, sin fuga de B ✓ |
+| Transacción nueva sin `SET LOCAL` (tras la de A) | 0 filas ✓ | 0 filas ✓ |
+| `SET LOCAL` tenant B | 1 fila, sin fuga de A ✓ | 1 fila, sin fuga de A ✓ |
+
+### Verificación del punto 4 — `postgres` salta el RLS (por qué la regla 1
+del CLAUDE.md lo prohíbe para negocio)
+Con la misma tabla y política, conectando como `postgres`
+(`rolbypassrls=true`) y sin ningún `SET LOCAL`, un `SELECT` devuelve **las
+filas de AMBOS tenants**:
+```
+[postgres, rolbypassrls=true] SELECT sin SET LOCAL -> 2 filas:
+   <uuid tenant A>  fila de tenant A
+   <uuid tenant B>  fila de tenant B
+```
+Esta es la demostración directa de por qué la regla 1 del CLAUDE.md prohíbe
+usar el rol `postgres`/service role para queries de negocio: `BYPASSRLS` no
+es una política más permisiva, es una salida total del sistema de RLS — da
+igual cuántas políticas por tenant existan, un rol con `bypassrls=true` las
+ignora todas. Toda query de negocio DEBE ir por `app_backend`
+(`NOBYPASSRLS`), nunca por `postgres`/service role.
+
+### Recomendación de modo de pooler
+**Usar modo transaction (6543)**, tal como ya decidía D4/regla 6 del
+CLAUDE.md — no por descarte del modo session (ambos aislaron correctamente
+en esta prueba), sino porque el modo transaction es el que escala con
+`holds`/rate limiting sobre Postgres sin agotar conexiones bajo carga
+concurrente (que es exactamente el escenario de producción, a diferencia de
+este spike con una sola conexión secuencial). El hallazgo 4 (CASE obligatorio
+en la política) y el hallazgo 3 (reintento tras rotar password) aplican por
+igual a los dos modos — no son un argumento para elegir uno u otro.
+
+### Limpieza
+Tabla `spike_rls_test` eliminada. El rol `app_backend` **se deja creado**
+(no es cruft del spike — es infraestructura real que S1-2 va a necesitar de
+todos modos); su password se ha rotado varias veces durante las pruebas y la
+última rotación queda solo en memoria del proceso del spike, no persistida
+en ningún sitio — S1-2 debe rotarla de nuevo y guardarla como corresponda.

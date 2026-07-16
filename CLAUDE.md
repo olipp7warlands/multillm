@@ -45,6 +45,10 @@ DLP → policy → gateway → ledger de créditos → auditoría inmutable.
 5. Escrituras de créditos: siempre a través de `LedgerService`, nunca INSERT directo.
 6. Con asyncpg + pooler de Supabase: `statement_cache_size=0` y `SET LOCAL
    app.tenant_id` SIEMPRE dentro de la transacción (nunca SET a secas).
+   Conexión SIEMPRE vía pooler (el host de conexión directa de Supabase es
+   IPv6-only). Tras rotar credenciales de `app_backend`, reintento con
+   backoff corto — el pooler no reconoce la password nueva de forma
+   instantánea (ver `docs/spike.md`, SP-3).
 
 ## Flujo de trabajo
 - Trabajar ticket a ticket desde @docs/BACKLOG.md, en orden; marcar `[x]` al terminar

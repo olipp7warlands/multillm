@@ -18,19 +18,30 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       Arranque OK (1-3 s). **p95 real ~290-300 ms, NO cumple el objetivo de 150 ms**
       en este equipo de desarrollo — ver diagnóstico y decisión en `docs/spike.md`;
       revalidar en specs de Railway antes de S1-9.
-- [ ] **SP-3 · Supabase RLS + pooler.** Contra el proyecto Supabase: crear rol
+- [x] **SP-3 · Supabase RLS + pooler.** Contra el proyecto Supabase: crear rol
       `app_backend` sin bypassrls, una tabla con política por `app.tenant_id`,
       y verificar desde asyncpg (statement_cache_size=0) que SET LOCAL dentro de
       transacción aísla correctamente a través del pooler. Salida en `docs/spike.md`.
+      Verificado en session y transaction mode. **Hallazgo crítico para S1-2**: toda
+      política RLS con `current_setting('app.tenant_id')` debe usar `CASE WHEN`
+      (nunca `AND ... <> ''` antes del cast) — entre transacciones el pooler deja el
+      GUC en `''` en vez de `NULL`, y Postgres no garantiza el orden de evaluación de
+      un `AND`. También: host directo IPv6-only (usar solo el pooler), y `postgres`
+      no es superuser real en Supabase (limita qué se puede `ALTER`/`DROP` sobre
+      roles ya creados). Detalle completo en `docs/spike.md`.
 
 ## SPRINT 1 — "Un tenant puede nacer y chatear"
 
 ### Fundación
-- [ ] **S1-1 · Scaffold del monorepo.** `backend/` (FastAPI, SQLAlchemy async, Alembic,
+- [x] **S1-1 · Scaffold del monorepo.** `backend/` (FastAPI, SQLAlchemy async, Alembic,
       pytest, ruff; litellm y presidio como dependencias) y `frontend/` (Next.js 16,
       TS strict, Tailwind). `.env` apunta al proyecto Supabase. Ambos arrancan en
       local con un comando cada uno; `/health` verifica conexión a Supabase.
       Configs de deploy para Railway (railway.json o Procfile por servicio).
+      Verificado: `pytest` (1 passed), `ruff check` limpio, `alembic upgrade head`
+      limpio contra `DATABASE_URL_ADMIN`, `npm run typecheck`/`build` limpios,
+      `/health` responde `{"status":"ok","supabase":"connected"}` con conexión real.
+      `DATABASE_URL` del backend usa `app_backend` vía pooler (modo transaction).
 - [ ] **S1-2 · Migración 001.** TODO el esquema de @docs/MODELO_DATOS.md aunque haya
       tablas sin UI todavía. RLS en toda tabla tenant-scoped. Triggers de inmutabilidad
       en ledger_entries y audit_events. Seed: providers + models + exchange_rates demo.
