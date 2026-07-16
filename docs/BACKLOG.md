@@ -82,11 +82,23 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       en `pyproject.toml`.
 
 ### Auth y onboarding
-- [ ] **S1-5 · Auth con Supabase.** Frontend usa Supabase Auth (email/password +
+- [x] **S1-5 · Auth con Supabase.** Frontend usa Supabase Auth (email/password +
       Google). Backend: dependencia FastAPI que verifica el JWT de Supabase y resuelve
       users/memberships propios (mapping con auth.users por supabase_user_id).
       Registro de tenant: crea tenant+owner+división default en una transacción.
       audit_event en login. Middleware de roles.
+      **Google queda pendiente** (necesita Client ID/Secret en el dashboard de
+      Supabase, decisión explícita para no bloquear el ticket — ver TODO en
+      `frontend/app/signup/page.tsx`). Migración 002 añade `users.supabase_user_id`
+      (mapping con `auth.users`, sin FK real — ver `docs/MODELO_DATOS.md`) y retira
+      `users.password_hash` (no custodiamos credenciales). Backend: `app/services/auth/`
+      (`get_current_user`, `require_role`, `register_tenant`, `record_login`), 16/16
+      tests en verde. Frontend: `/login` y `/signup` con Supabase Auth real
+      (`@supabase/ssr`), usando los primeros design tokens CSS del proyecto (nunca
+      colores hardcodeados). Verificado con JWT firmados a mano en los tests y,
+      contra Supabase real, hasta el punto en que el rate limit de email de la
+      cuenta lo permitió (confirma que el signup real activa el flujo de
+      confirmación por email, que la página ya contempla).
 - [ ] **S1-6 · Onboarding wizard (backend).** Endpoints: validate-key (llamada de test
       real al proveedor, persiste cifrada si válida — envelope encryption D2),
       enable-models (camino reseller), dlp-preset (Estricto|Equilibrado|Solo avisar),

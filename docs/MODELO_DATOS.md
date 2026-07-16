@@ -8,6 +8,11 @@ Reglas globales:
 - Tablas marcadas **[global]** no llevan RLS de tenant (catálogo y operador).
 - `ledger_entries` y `audit_events`: trigger que rechaza UPDATE y DELETE.
 - PKs: UUID v7 (orden temporal). Timestamps: `timestamptz`, UTC.
+- Sin FK reales hacia esquemas gestionados por Supabase (`auth.*`, etc.):
+  se referencian por valor (p.ej. `users.supabase_user_id`), nunca con una
+  `REFERENCES auth.users(id)` — esos esquemas los migra Supabase con su
+  propio ciclo de vida, no el nuestro, y una FK cruzada nos acoplaría a su
+  implementación interna.
 
 ## Plantilla canónica de política RLS (obligatoria, verificada en SP-3)
 
@@ -95,8 +100,12 @@ tenant_branding
 
 users
   id, tenant_id, email,         -- UNIQUE (tenant_id, email)
-  password_hash NULL, oauth_provider NULL, oauth_subject NULL,
+  supabase_user_id UUID UNIQUE, -- mapea con auth.users.id (Supabase Auth); SIN FK real
+                                -- hacia auth.users, ver regla más abajo (migración 002)
+  oauth_provider NULL, oauth_subject NULL,
   name, status, last_login_at, created_at
+  -- SIN password_hash: con Supabase Auth como único mecanismo de login no
+  -- custodiamos credenciales nosotros (retirado en migración 002)
 
 divisions
   id, tenant_id, name, is_default bool, created_at

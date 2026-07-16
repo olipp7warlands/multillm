@@ -84,9 +84,11 @@ async def _create_tenant_fixture(
         slug,
     )
     user_id = await conn.fetchval(
-        "INSERT INTO users (tenant_id, email, name) VALUES ($1, $2, 'User') RETURNING id",
+        "INSERT INTO users (tenant_id, email, name, supabase_user_id) "
+        "VALUES ($1, $2, 'User', $3) RETURNING id",
         tenant_id,
         f"{slug}@example.com",
+        uuid.uuid4(),
     )
     division_id = await conn.fetchval(
         "INSERT INTO divisions (tenant_id, name) VALUES ($1, 'Default') RETURNING id",

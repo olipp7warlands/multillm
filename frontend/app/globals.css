@@ -3,11 +3,22 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  /* placeholders — S2-5 los sobrescribe en SSR con tenant_branding.color_primary/
+     color_accent por tenant; ningún componente debe usar un color fuera de estos
+     tokens (convención del proyecto, ver CLAUDE.md) */
+  --border: #d1d5db;
+  --primary: #171717;
+  --primary-foreground: #ffffff;
+  --danger: #dc2626;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -16,6 +27,7 @@
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
+    --border: #3f3f46;
   }
 }
 
