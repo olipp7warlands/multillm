@@ -49,6 +49,9 @@ DLP → policy → gateway → ledger de créditos → auditoría inmutable.
    IPv6-only). Tras rotar credenciales de `app_backend`, reintento con
    backoff corto — el pooler no reconoce la password nueva de forma
    instantánea (ver `docs/spike.md`, SP-3).
+7. Toda query a tablas tenant-scoped va vía `tenant_session()`; una query
+   que devuelve vacío inesperadamente = sospechar SET LOCAL ausente antes
+   que datos ausentes (visto dos veces en S1-4, mismo patrón).
 
 ## Flujo de trabajo
 - Trabajar ticket a ticket desde @docs/BACKLOG.md, en orden; marcar `[x]` al terminar
