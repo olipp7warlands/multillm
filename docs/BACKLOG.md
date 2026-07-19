@@ -178,7 +178,7 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       Verificado: `pytest` 32/32 en verde (6 tests nuevos en `test_policy.py` +
       fixture añadida a `test_rls.py` para la tabla nueva), `ruff check`/`ruff
       format --check` limpios, `alembic upgrade head` y `downgrade base` limpios.
-- [ ] **S1-9 · DLPService.** Presidio en proceso (engine precargado en lifespan) +
+- [x] **S1-9 · DLPService.** Presidio en proceso (engine precargado en lifespan) +
       recognizers custom desde dlp_dictionaries (cache en memoria con versión en DB,
       invalidación al editar). Veredicto
       según dlp_settings de la división (block|mask|warn). Placeholders estilo
@@ -194,6 +194,52 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       ~290-300 ms frente al objetivo de 150 ms) antes de dar el rendimiento por bueno;
       si Railway confirma el mismo orden de magnitud, evaluar `es_core_news_sm` o
       solapar el análisis DLP con PolicyService en vez de ejecutarlos en serie.
+      `app/services/dlp/`: `init_engine()` construye el `AnalyzerEngine` sobre
+      `es_core_news_md` vía `NlpEngineProvider` (la forma por defecto de
+      `AnalyzerEngine()` sin `nlp_engine` explícito descarga y usa un modelo inglés
+      por sorpresa — detectado al prototipar, no es solo un detalle de config) y
+      poda los cuatro recognizers del ticket + sustituye `PhoneRecognizer`, tal como
+      pide el AC. **Más allá de esos cuatro** (decisión propia, mismo espíritu de "solo
+      lo relevante"): cada llamada a `analyze()` pasa una whitelist explícita de
+      `entities=` (PERSON, LOCATION, EMAIL_ADDRESS, PHONE_NUMBER, IBAN_CODE,
+      CREDIT_CARD, ES_NIF, ES_NIE) — `AnalyzerEngine` filtra por `entities` ANTES de
+      ejecutar cada recognizer, no después, así que esto también deja fuera a
+      `UrlRecognizer` y las etiquetas AGE/DATE_TIME/ID/NRP/ORGANIZATION que
+      `SpacyRecognizer` añade con este modelo, sin tocar el registry global — menos
+      recognizers corriendo por request ayuda directamente al problema de p95 del
+      spike. Diccionario del tenant/división: un `PatternRecognizer` ad-hoc por
+      categoría presente (`dlp_dictionaries.category` → `DLP_DICT_CLIENT`/`_PROJECT`/
+      `_CODE`/`_CUSTOM`), pasado vía `ad_hoc_recognizers` en cada llamada — no se toca
+      el registry compartido con datos de un tenant. Placeholders numerados
+      (`<PERSONA_1>`, `<PERSONA_2>`...) vía `AnonymizerEngine` con un operador
+      `"custom"` por tipo (mismo valor exacto reutiliza el mismo número); los
+      solapamientos entre recognizers (visto en el prototipo: `IBAN_CODE` y
+      `LOCATION` casando el mismo IBAN) los resuelve la estrategia por defecto de
+      `AnonymizerEngine` (`MERGE_SIMILAR_OR_CONTAINED`) — no hay lógica de
+      solapamiento a mano. `IMPORTE_1` del ejemplo del ticket no tiene recognizer
+      detrás: no hay ninguno de importes/dinero en el spike ni en el alcance
+      documentado — placeholder ilustrativo, no un entity type real todavía.
+      Caché de `dlp_settings`/`dlp_dictionaries`: mismo patrón TTL (60s) +
+      `invalidate_dlp_cache(tenant_id)` que `tenant_resolver` — sin columna de
+      versión porque, a diferencia de `tenant_branding.updated_at`, no hay ninguna
+      en el esquema que sirva de marca; para S2-1 (CRUD de diccionarios) basta con
+      llamar a esa función tras escribir. **Decisión propia sin AC explícito**: sin
+      fila de `dlp_settings` para un tenant, el modo por defecto es `block`
+      (fail-closed), no el más permisivo — mismo principio que el fail-closed de
+      MeteringService (docs/ARQUITECTURA.md); un DLP sin configurar no debe
+      equivaler a sin protección. **Fuera de alcance a propósito**: `analyze()` no
+      escribe `requests` ni `audit_events` — esas escrituras transaccionales son de
+      GatewayService (S1-10). Endpoint mínimo de prueba `POST /api/dlp/analyze`.
+      **Pendiente, tal como pide el AC**: el benchmark de p95 en specs reales de
+      Railway NO se ha revalidado (no hay despliegue Railway todavía) — sigue el
+      número del spike (~290-300 ms en portátil de desarrollo) como advertencia
+      abierta para S1-10/despliegue, ninguna mitigación (es_core_news_sm, solapar con
+      PolicyService) se aplicó todavía porque el AC pide medir antes de decidir.
+      Verificado: `pytest` 39/39 en verde (7 tests nuevos en `test_dlp.py`, incluye
+      solapamiento, reutilización de placeholder, modo warn, fail-closed sin config,
+      y el endpoint HTTP), `ruff check`/`ruff format --check` limpios, y arranque
+      real de `uvicorn` (no solo los tests, que no disparan el lifespan de FastAPI
+      con `ASGITransport`) para confirmar que `init_engine()` no rompe el startup.
 - [ ] **S1-10 · GatewayService + streaming.** POST /api/chat/stream (SSE) con el pipeline
       completo de @docs/ARQUITECTURA.md: policy → DLP (409 masked / 422 blocked) → hold
       de créditos en Postgres (reseller) → stream con litellm.acompletion → transacción

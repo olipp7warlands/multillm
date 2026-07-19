@@ -1,4 +1,6 @@
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +10,7 @@ from sqlalchemy import text
 
 from app.config import settings
 from app.db import engine
+from app.services import dlp
 from app.services.auth import (
     AuthenticatedIdentity,
     CurrentUser,
@@ -34,7 +37,16 @@ from app.services.tenant_resolver import (
     resolve_tenant,
 )
 
-app = FastAPI(title="AIhub API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # Carga spaCy es_core_news_md (1-3s, SP-2 docs/spike.md) — irrelevante
+    # una vez en el arranque, inaceptable si se hiciera por request.
+    dlp.init_engine()
+    yield
+
+
+app = FastAPI(title="AIhub API", lifespan=lifespan)
 
 # El frontend llama al backend cross-origin (mismo host, puerto distinto —
 # ver frontend/lib/api.ts): sin esto el navegador bloquea la petición real
@@ -260,3 +272,30 @@ async def policy_check_endpoint(
     except PolicyDeniedError as e:
         return JSONResponse(status_code=403, content={"reason": e.reason, "detail": e.detail})
     return {"allowed": True, "model_source": result.model_source}
+
+
+# --- DLPService (S1-9) ---
+
+
+class DlpAnalyzeRequest(BaseModel):
+    prompt: str
+
+
+@app.post("/api/dlp/analyze")
+async def dlp_analyze_endpoint(
+    payload: DlpAnalyzeRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Endpoint mínimo para demostrar/probar DLPService de punta a punta —
+    GatewayService (S1-10) es quien lo llama de verdad dentro del pipeline
+    de /api/chat/stream (409 masked / 422 blocked)."""
+    result = await dlp.analyze(
+        tenant_id=current_user.tenant_id,
+        division_id=current_user.division_id,
+        prompt=payload.prompt,
+    )
+    return {
+        "verdict": result.verdict,
+        "masked_text": result.masked_text,
+        "entities_summary": result.entities_summary,
+    }
