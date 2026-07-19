@@ -57,3 +57,7 @@ DLP → policy → gateway → ledger de créditos → auditoría inmutable.
 - Trabajar ticket a ticket desde @docs/BACKLOG.md, en orden; marcar `[x]` al terminar
 - Cada ticket termina con sus tests pasando y `alembic upgrade head` limpio
 - Si una decisión no está en docs/, preguntar antes de asumir
+- Los resúmenes de ticket (lo verificado, gotchas encontrados) se escriben en
+  español, igual que los commits — inline en el propio checkbox de
+  @docs/BACKLOG.md. No existe ni existirá un directorio `tasks/`: no crear
+  `tasks/todo.md` ni `tasks/lessons.md`, las notas van siempre en BACKLOG.md
