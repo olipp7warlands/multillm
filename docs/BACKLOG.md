@@ -153,9 +153,31 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       reales, pero el camino técnico ya no tiene bloqueos.
 
 ### Pipeline de chat
-- [ ] **S1-8 · PolicyService.** Visibilidad de modelo por rol/división (tenant_model_access
+- [x] **S1-8 · PolicyService.** Visibilidad de modelo por rol/división (tenant_model_access
       + min_role), saldo (wallet + allocation del período), rate limit con contadores
       en Postgres por ventana (usuario y tenant). Denegación → 403 + audit_event.
+      `app/services/policy/check()`: los tres motivos de docs/ARQUITECTURA.md
+      (`model_not_enabled` cubre también min_role insuficiente — de cara al usuario
+      es el mismo "no ves este modelo"; `no_balance` cubre wallet agotada y, solo en
+      modo reseller, presupuesto de división agotado si existe una fila de
+      `division_allocations` para el periodo actual — sin fila no bloquea, todavía no
+      hay UI de asignación (S2-2); `rate_limited` con ventana fija de 1 minuto vía
+      `INSERT ... ON CONFLICT DO UPDATE` atómico, sin `SELECT ... FOR UPDATE`).
+      Tabla nueva `rate_limit_counters` (migración `92a01398c4fe`): el backlog pedía
+      el mecanismo sin fijar esquema, así que quedó documentada en
+      docs/MODELO_DATOS.md igual que el resto. Límites de rate limit (60/min usuario,
+      600/min tenant) son un valor provisional — no hay cifra de producto
+      documentada, ajustar cuando exista un plan/tarifa real. Endpoint mínimo de
+      prueba `POST /api/policy/check`, mismo patrón que `/api/whoami` (S1-4).
+      **Gap detectado, fuera de scope de este ticket**: ni `register_tenant` (S1-5)
+      ni el wizard (S1-6/S1-7) crean una fila en `wallets` al dar de alta un tenant
+      reseller — hoy cualquier tenant nuevo deniega siempre por `no_balance` hasta
+      su primer topup. Comportamiento correcto (sin fila = 0 disponible), pero el
+      flujo de topup de S2-2 tendrá que crear la fila si no existe, no asumir que ya
+      está ahí.
+      Verificado: `pytest` 32/32 en verde (6 tests nuevos en `test_policy.py` +
+      fixture añadida a `test_rls.py` para la tabla nueva), `ruff check`/`ruff
+      format --check` limpios, `alembic upgrade head` y `downgrade base` limpios.
 - [ ] **S1-9 · DLPService.** Presidio en proceso (engine precargado en lifespan) +
       recognizers custom desde dlp_dictionaries (cache en memoria con versión en DB,
       invalidación al editar). Veredicto

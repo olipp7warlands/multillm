@@ -182,6 +182,14 @@ async def _create_tenant_fixture(
         "INSERT INTO audit_events (tenant_id, event_type) VALUES ($1, 'login')",
         tenant_id,
     )
+    await conn.execute(
+        """
+        INSERT INTO rate_limit_counters (tenant_id, scope, scope_id, window_start, request_count)
+        VALUES ($1, 'user', $2, date_trunc('minute', now()), 1)
+        """,
+        tenant_id,
+        user_id,
+    )
     return tenant_id
 
 

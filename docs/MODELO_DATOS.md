@@ -201,6 +201,29 @@ dlp_settings
   UNIQUE (tenant_id, division_id)
 ```
 
+## Rate limiting (PolicyService, S1-8)
+
+Añadida en la migración `92a01398c4fe`, posterior a la 001 — el backlog pide
+el mecanismo ("contadores Postgres por ventana, usuario y tenant") sin fijar
+el esquema, así que queda documentado aquí igual que el resto del modelo.
+
+```sql
+rate_limit_counters
+  tenant_id, scope,           -- user|tenant
+  scope_id,                   -- user_id o tenant_id según scope (sin FK
+                               -- propia: apunta a una tabla u otra)
+  window_start timestamptz,   -- ventana fija de 1 minuto, truncada
+  request_count int DEFAULT 0
+  PRIMARY KEY (tenant_id, scope, scope_id, window_start)
+```
+
+Ventana fija (no sliding window): la fila de la ventana actual se crea o
+incrementa con `INSERT ... ON CONFLICT DO UPDATE SET request_count =
+request_count + 1`, atómico en Postgres por sí mismo — no hace falta
+`SELECT ... FOR UPDATE`. Sin job de limpieza todavía (las ventanas pasadas
+se acumulan); se añade cuando el volumen lo pida, igual que el TTL de holds
+huérfanos de `docs/ARQUITECTURA.md`.
+
 ## Auditoría
 ```sql
 audit_events    -- INMUTABLE (trigger anti UPDATE/DELETE)

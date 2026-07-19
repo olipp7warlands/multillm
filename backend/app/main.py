@@ -26,6 +26,8 @@ from app.services.onboarding import (
     set_dlp_preset,
     validate_and_store_key,
 )
+from app.services.policy import PolicyDeniedError
+from app.services.policy import check as policy_check
 from app.services.tenant_resolver import (
     TenantNotFoundError,
     TenantSuspendedError,
@@ -230,3 +232,31 @@ async def invite_team_endpoint(
 async def enabled_models_endpoint(current_user: CurrentUser = Depends(get_current_user)):
     """Cualquier miembro autenticado (no solo el owner) — landing de /chat."""
     return {"models": await list_enabled_models(tenant_id=current_user.tenant_id)}
+
+
+# --- PolicyService (S1-8) ---
+
+
+class PolicyCheckRequest(BaseModel):
+    model_id: str
+
+
+@app.post("/api/policy/check")
+async def policy_check_endpoint(
+    payload: PolicyCheckRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Endpoint mínimo para demostrar/probar PolicyService de punta a
+    punta — GatewayService (S1-10) es quien lo llama de verdad dentro del
+    pipeline de /api/chat/stream."""
+    try:
+        result = await policy_check(
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+            role=current_user.role,
+            division_id=current_user.division_id,
+            model_id=payload.model_id,
+        )
+    except PolicyDeniedError as e:
+        return JSONResponse(status_code=403, content={"reason": e.reason, "detail": e.detail})
+    return {"allowed": True, "model_source": result.model_source}
