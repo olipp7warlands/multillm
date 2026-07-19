@@ -1,8 +1,12 @@
+import re
+
 from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from app.config import settings
 from app.db import engine
 from app.services.auth import (
     AuthenticatedIdentity,
@@ -16,6 +20,9 @@ from app.services.auth import (
 from app.services.onboarding import (
     complete_onboarding,
     enable_models,
+    invite_team,
+    list_enabled_models,
+    list_models_catalog,
     set_dlp_preset,
     validate_and_store_key,
 )
@@ -26,6 +33,18 @@ from app.services.tenant_resolver import (
 )
 
 app = FastAPI(title="AIhub API")
+
+# El frontend llama al backend cross-origin (mismo host, puerto distinto —
+# ver frontend/lib/api.ts): sin esto el navegador bloquea la petición real
+# tras un preflight OPTIONS en 405 y el fetch() nunca llega al backend.
+# Cualquier subdominio de BASE_DOMAIN (tenant o sin tenant, cualquier puerto).
+_dev_origin_regex = rf"^https?://([a-z0-9-]+\.)?{re.escape(settings.base_domain)}(:\d+)?$"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=_dev_origin_regex,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Endpoints que no dependen de un tenant (infra, o el propio alta de tenant
 # nuevo — por definición no hay tenant que resolver todavía) — se sirven sin
@@ -179,3 +198,35 @@ async def complete_onboarding_endpoint(
         actor_role=current_user.role,
     )
     return {"completed": True}
+
+
+@app.get("/api/onboarding/models-catalog")
+async def models_catalog_endpoint(current_user: CurrentUser = Depends(require_role("owner"))):
+    """Catálogo [global], para el paso "modelos" (bifurcación reseller)."""
+    return {"models": await list_models_catalog()}
+
+
+class InviteTeamRequest(BaseModel):
+    emails: list[str]
+
+
+@app.post("/api/onboarding/invite-team")
+async def invite_team_endpoint(
+    payload: InviteTeamRequest,
+    current_user: CurrentUser = Depends(require_role("owner")),
+):
+    """Persiste las invitaciones (división default, rol user) — el envío
+    real del email es S2-7, aquí no se manda nada todavía."""
+    count = await invite_team(
+        tenant_id=current_user.tenant_id,
+        emails=payload.emails,
+        role="user",
+        created_by=current_user.id,
+    )
+    return {"invited": count}
+
+
+@app.get("/api/models/enabled")
+async def enabled_models_endpoint(current_user: CurrentUser = Depends(get_current_user)):
+    """Cualquier miembro autenticado (no solo el owner) — landing de /chat."""
+    return {"models": await list_enabled_models(tenant_id=current_user.tenant_id)}

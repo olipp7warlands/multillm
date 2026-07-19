@@ -2,15 +2,11 @@
 
 import { useState, type FormEvent } from "react";
 
-import { apiFetch } from "@/lib/api";
 import { createClient } from "@/lib/supabase/client";
 
 export default function SignupPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [ownerName, setOwnerName] = useState("");
-  const [tenantName, setTenantName] = useState("");
-  const [slug, setSlug] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -29,35 +25,17 @@ export default function SignupPage() {
     }
 
     if (!data.session) {
-      // el proyecto de Supabase exige confirmar el email antes de dar sesión —
-      // el alta del tenant (register-tenant) se completa en el primer login
-      // tras confirmar (TODO: flujo completo en el wizard de S1-6/S1-7).
+      // el proyecto exige confirmar el email antes de dar sesión (o el rate
+      // limit de envío de Supabase bloqueó el correo) — no hay nada que
+      // completar aquí hasta que exista una sesión real.
       setPendingConfirmation(true);
       setLoading(false);
       return;
     }
 
-    const response = await apiFetch(
-      "/api/auth/register-tenant",
-      data.session.access_token,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          slug,
-          tenant_name: tenantName,
-          billing_mode: "reseller",
-          owner_name: ownerName,
-        }),
-      },
-    );
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      setError(body.detail ?? "No se pudo crear el espacio");
-      setLoading(false);
-      return;
-    }
-
-    window.location.href = `http://${slug}.lvh.me:3000/login`;
+    // el alta del espacio (tenant + owner + división) es el paso 1 del
+    // wizard, no de aquí — ver app/(onboarding)/start
+    window.location.href = "/start";
   }
 
   if (pendingConfirmation) {
@@ -73,16 +51,8 @@ export default function SignupPage() {
 
   return (
     <main className="mx-auto flex min-h-screen max-w-sm flex-col justify-center gap-4 p-6">
-      <h1 className="text-xl font-semibold text-foreground">Crea tu espacio</h1>
+      <h1 className="text-xl font-semibold text-foreground">Crea tu cuenta</h1>
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-        <input
-          type="text"
-          required
-          placeholder="Tu nombre"
-          value={ownerName}
-          onChange={(event) => setOwnerName(event.target.value)}
-          className="rounded border border-border bg-background px-3 py-2 text-foreground"
-        />
         <input
           type="email"
           required
@@ -100,30 +70,13 @@ export default function SignupPage() {
           onChange={(event) => setPassword(event.target.value)}
           className="rounded border border-border bg-background px-3 py-2 text-foreground"
         />
-        <input
-          type="text"
-          required
-          placeholder="Nombre de la empresa"
-          value={tenantName}
-          onChange={(event) => setTenantName(event.target.value)}
-          className="rounded border border-border bg-background px-3 py-2 text-foreground"
-        />
-        <input
-          type="text"
-          required
-          pattern="[a-z0-9-]+"
-          placeholder="Subdominio (slug)"
-          value={slug}
-          onChange={(event) => setSlug(event.target.value.toLowerCase())}
-          className="rounded border border-border bg-background px-3 py-2 text-foreground"
-        />
         {error && <p className="text-sm text-danger">{error}</p>}
         <button
           type="submit"
           disabled={loading}
           className="rounded bg-primary px-3 py-2 text-primary-foreground disabled:opacity-50"
         >
-          {loading ? "Creando…" : "Crear espacio"}
+          {loading ? "Creando…" : "Continuar"}
         </button>
       </form>
       <a href="/login" className="text-sm text-foreground underline">

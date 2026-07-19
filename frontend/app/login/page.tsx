@@ -36,8 +36,8 @@ export default function LoginPage() {
       return;
     }
 
-    // TODO(S1-12): guardar el perfil resuelto (rol, división) y redirigir a /chat
-    window.location.href = "/";
+    // TODO(S1-12): guardar el perfil resuelto (rol, división) en el estado de la app
+    window.location.href = "/chat";
   }
 
   return (

@@ -2,12 +2,13 @@
 habilitar modelos (camino reseller), preset de DLP, cierre del wizard.
 """
 
+import secrets
 from dataclasses import dataclass
 
 import litellm
 from sqlalchemy import text
 
-from app.db import tenant_session
+from app.db import engine, tenant_session
 from app.services.gateway import encrypt_provider_key
 
 # Estricto|Equilibrado|Solo avisar (backlog, en español) -> dlp_settings.mode
@@ -194,3 +195,107 @@ async def complete_onboarding(*, tenant_id: str, actor_user_id: str, actor_role:
             """),
             {"tenant_id": tenant_id, "actor_user_id": actor_user_id, "actor_role": actor_role},
         )
+
+
+async def list_models_catalog() -> list[dict]:
+    """Catálogo [global] (sin RLS de tenant) para el paso "modelos" del
+    wizard: modelo + proveedor + precios vigentes (valid_to IS NULL)."""
+    async with engine.connect() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    text("""
+                    SELECT m.id, m.slug, m.display_name, p.slug AS provider_slug,
+                           p.name AS provider_name, er.unit, er.credit_price
+                    FROM models m
+                    JOIN providers p ON p.id = m.provider_id
+                    LEFT JOIN exchange_rates er
+                        ON er.model_id = m.id AND er.valid_to IS NULL
+                    WHERE m.status = 'active'
+                    ORDER BY p.name, m.display_name, er.unit
+                """)
+                )
+            )
+            .mappings()
+            .all()
+        )
+
+    catalog: dict[str, dict] = {}
+    for row in rows:
+        model_id = str(row["id"])
+        entry = catalog.setdefault(
+            model_id,
+            {
+                "id": model_id,
+                "slug": row["slug"],
+                "display_name": row["display_name"],
+                "provider_slug": row["provider_slug"],
+                "provider_name": row["provider_name"],
+                "prices": [],
+            },
+        )
+        if row["unit"] is not None:
+            entry["prices"].append(
+                {"unit": row["unit"], "credit_price": float(row["credit_price"])}
+            )
+
+    return list(catalog.values())
+
+
+async def invite_team(*, tenant_id: str, emails: list[str], role: str, created_by: str) -> int:
+    """Crea filas en `invitations` (token + expiración) para la división
+    default del tenant. El ENVÍO real del email es S2-7 — aquí solo se deja
+    la invitación persistida; token_hash es un placeholder de un solo uso
+    hasta que S2-7 defina el esquema real de token (firmado, un solo uso)."""
+    async with tenant_session(tenant_id) as session:
+        division_id = (
+            await session.execute(
+                text(
+                    "SELECT id FROM divisions "
+                    "WHERE tenant_id = :tenant_id AND is_default = true LIMIT 1"
+                ),
+                {"tenant_id": tenant_id},
+            )
+        ).scalar_one()
+
+        for email in emails:
+            await session.execute(
+                text("""
+                    INSERT INTO invitations
+                        (tenant_id, email, division_id, role, token_hash, expires_at, created_by)
+                    VALUES
+                        (:tenant_id, :email, :division_id, :role, :token_hash,
+                         now() + interval '7 days', :created_by)
+                """),
+                {
+                    "tenant_id": tenant_id,
+                    "email": email,
+                    "division_id": division_id,
+                    "role": role,
+                    "token_hash": secrets.token_hex(32),
+                    "created_by": created_by,
+                },
+            )
+
+    return len(emails)
+
+
+async def list_enabled_models(*, tenant_id: str) -> list[dict]:
+    """Modelos habilitados para ESTE tenant (tenant_model_access.enabled) —
+    consulta mínima para el landing de /chat al terminar el wizard. Sin
+    filtrado por rol/división todavía: eso es PolicyService (S1-8), que
+    puede ampliar o sustituir esta consulta cuando exista."""
+    async with tenant_session(tenant_id) as session:
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT m.id, m.display_name, m.slug
+                    FROM tenant_model_access tma
+                    JOIN models m ON m.id = tma.model_id
+                    WHERE tma.tenant_id = :tenant_id AND tma.enabled = true
+                    ORDER BY m.display_name
+                """),
+                {"tenant_id": tenant_id},
+            )
+        ).mappings().all()
+    return [{"id": str(r["id"]), "display_name": r["display_name"], "slug": r["slug"]} for r in rows]

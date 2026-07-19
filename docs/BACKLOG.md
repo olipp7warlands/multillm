@@ -110,11 +110,47 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       antes de guardar — confirmado que los bytes en `provider_connections.encrypted_key`
       nunca contienen el texto plano, con round-trip de descifrado correcto. DLP preset
       mapea Estricto→block, Equilibrado→mask, Solo avisar→warn. 23/23 tests en verde.
-- [ ] **S1-7 · Onboarding wizard (frontend).** 4 pasos: espacio (nombre, slug, logo,
-      color) → modelos (bifurcación BYOK con check verde animado al validar / catálogo
-      reseller con precios en créditos) → preset DLP → invitar equipo (emails,
-      puede saltarse). Al terminar aterriza en /chat con modelos activos.
-      Objetivo UX: < 5 min de key a primer prompt.
+- [x] **S1-7 · Onboarding wizard (frontend).** 4 pasos en `app/(onboarding)/start/`:
+      espacio (nombre, slug, logo, color) → modelos (bifurcación BYOK con check verde
+      animado al validar / catálogo reseller con precios en créditos) → preset DLP →
+      invitar equipo (emails, puede saltarse). Al terminar llama a
+      `/api/onboarding/complete` y redirige a `/chat` (404 esperado — la página es
+      S1-12, todavía no existe). Backend: nuevos endpoints de soporte
+      `GET /api/onboarding/models-catalog`, `POST /api/onboarding/invite-team`,
+      `GET /api/models/enabled`. La sesión de Supabase se guarda en cookie con
+      `domain=BASE_DOMAIN` para sobrevivir el salto de host del wizard (sin tenant →
+      `<slug>.BASE_DOMAIN`).
+      **Verificado con un flujo real de navegador** (Playwright): como el signup real
+      contra Supabase chocó con su rate limit de email (ya documentado, ver S2-8), la
+      sesión se inyectó como cookie firmando un JWT con `SUPABASE_JWT_SECRET` — mismo
+      mecanismo que ya usan los tests de pytest, no un atajo nuevo. Los 4 pasos
+      completan de punta a punta (tenant creado → modelo habilitado → preset guardado
+      → invitación persistida → `complete` → redirect a `/chat`) sin errores de
+      consola ni peticiones fallidas.
+      **Encontrado y corregido durante esa verificación** (ninguno estaba cubierto por
+      `pytest`/`tsc` porque ambos evitan el navegador real):
+      1. `next.config.ts` no declaraba `allowedDevOrigins` — Next 16 bloquea por
+         defecto los recursos de dev cross-origin, y la convención de dev del
+         proyecto (`<slug>.lvh.me:3000`) es cross-origin por definición. Sin esto la
+         app nunca hidrataba en ningún subdominio (React nunca se montaba, cualquier
+         formulario hacía un submit nativo GET en vez de llamar al handler).
+      2. El backend no tenía `CORSMiddleware` en absoluto — ninguna llamada del
+         frontend al backend (puerto distinto) había funcionado nunca desde un
+         navegador real; el preflight `OPTIONS` devolvía 405. Añadido con
+         `allow_origin_regex` sobre `settings.base_domain` (mismo config ya usado por
+         `tenant_resolver`).
+      3. `test_onboarding.py::test_enabled_models_endpoint_reflects_enable_models`
+         tenía el bug de la regla 7 del CLAUDE.md: la query de setup corría en una
+         conexión sin `SET LOCAL app.tenant_id`, así que RLS la dejaba ver siempre 0
+         filas de `tenant_model_access` — el test pasaba o fallaba según qué modelo
+         hubiera quedado habilitado por un test anterior en el mismo tenant
+         (fixture `module`-scoped), no según el comportamiento real del endpoint.
+      4. `pattern="[a-z0-9-]+"` en el input de slug rompía en Chrome actual (parsea
+         los `pattern` de HTML en modo Unicode-set `v`, donde un `-` sin escapar al
+         final de una clase de caracteres es sintaxis inválida) — `SyntaxError` en
+         consola en cada carga de `/start`. Corregido a `[a-z0-9\-]+`.
+      Objetivo UX: < 5 min de key a primer prompt — pendiente de medir con usuarios
+      reales, pero el camino técnico ya no tiene bloqueos.
 
 ### Pipeline de chat
 - [ ] **S1-8 · PolicyService.** Visibilidad de modelo por rol/división (tenant_model_access

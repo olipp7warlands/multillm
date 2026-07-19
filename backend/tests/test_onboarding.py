@@ -210,3 +210,104 @@ async def test_complete_onboarding_endpoint(onboarding_tenant):
     finally:
         await conn.close()
     assert n == 1
+
+
+async def test_models_catalog_endpoint(onboarding_tenant):
+    token = _sign_test_jwt(onboarding_tenant["supabase_user_id"], "onb-owner@example.com")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/onboarding/models-catalog",
+            headers={
+                "host": f"{onboarding_tenant['slug']}.lvh.me:3000",
+                "authorization": f"Bearer {token}",
+            },
+        )
+    assert response.status_code == 200
+    models = response.json()["models"]
+    assert len(models) >= 3  # los 3 del seed de la migración 001
+    for model in models:
+        assert model["prices"], f"{model['slug']} sin precios vigentes"
+        assert all(p["credit_price"] > 0 for p in model["prices"])
+
+
+async def test_invite_team_endpoint_creates_invitations(onboarding_tenant):
+    token = _sign_test_jwt(onboarding_tenant["supabase_user_id"], "onb-owner@example.com")
+    emails = [f"invitee-{uuid.uuid4().hex[:6]}@example.com" for _ in range(2)]
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/onboarding/invite-team",
+            headers={
+                "host": f"{onboarding_tenant['slug']}.lvh.me:3000",
+                "authorization": f"Bearer {token}",
+            },
+            json={"emails": emails},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"invited": 2}
+
+    conn = await asyncpg.connect(_app_backend_dsn(), statement_cache_size=0, ssl="require")
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.tenant_id', $1, true)", onboarding_tenant["tenant_id"]
+            )
+            rows = await conn.fetch(
+                "SELECT email, role FROM invitations WHERE tenant_id = $1 AND email = ANY($2)",
+                uuid.UUID(onboarding_tenant["tenant_id"]),
+                emails,
+            )
+    finally:
+        await conn.close()
+    assert len(rows) == 2
+    assert all(r["role"] == "user" for r in rows)
+
+
+async def test_enabled_models_endpoint_reflects_enable_models(onboarding_tenant):
+    conn = await asyncpg.connect(_app_backend_dsn(), statement_cache_size=0, ssl="require")
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.tenant_id', $1, true)", onboarding_tenant["tenant_id"]
+            )
+            model_id = await conn.fetchval(
+                "SELECT id FROM models WHERE id NOT IN "
+                "(SELECT model_id FROM tenant_model_access WHERE tenant_id = $1) LIMIT 1",
+                uuid.UUID(onboarding_tenant["tenant_id"]),
+            )
+    finally:
+        await conn.close()
+
+    token = _sign_test_jwt(onboarding_tenant["supabase_user_id"], "onb-owner@example.com")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        before = await client.get(
+            "/api/models/enabled",
+            headers={
+                "host": f"{onboarding_tenant['slug']}.lvh.me:3000",
+                "authorization": f"Bearer {token}",
+            },
+        )
+        assert before.status_code == 200
+        before_ids = {m["id"] for m in before.json()["models"]}
+        assert str(model_id) not in before_ids
+
+        await client.post(
+            "/api/onboarding/enable-models",
+            headers={
+                "host": f"{onboarding_tenant['slug']}.lvh.me:3000",
+                "authorization": f"Bearer {token}",
+            },
+            json={"model_ids": [str(model_id)]},
+        )
+
+        after = await client.get(
+            "/api/models/enabled",
+            headers={
+                "host": f"{onboarding_tenant['slug']}.lvh.me:3000",
+                "authorization": f"Bearer {token}",
+            },
+        )
+    after_ids = {m["id"] for m in after.json()["models"]}
+    assert str(model_id) in after_ids
