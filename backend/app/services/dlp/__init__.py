@@ -11,6 +11,7 @@ transaccionales son responsabilidad de GatewayService (S1-10), que es quien
 decide qué hacer con el veredicto dentro del pipeline completo.
 """
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -75,6 +76,14 @@ def init_engine() -> None:
     en el lifespan de FastAPI. Vuelve a crear el engine si ya existía (por
     ejemplo, un test de módulo que lo necesita antes de que arranque la app)."""
     global _analyzer_engine
+
+    # Presidio, en DEBUG, loguea el texto original (contexto de entidades,
+    # valores de match) — nunca debe propagarse a ese nivel en esta app, sea
+    # cual sea la config de logging raíz (regla 3, CLAUDE.md; hallazgo del
+    # test de logging de S1-10 en tests/test_gateway.py).
+    for logger_name in ("presidio-analyzer", "presidio-anonymizer"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
     nlp_configuration = {
         "nlp_engine_name": "spacy",
         "models": [{"lang_code": "es", "model_name": "es_core_news_md"}],
@@ -196,6 +205,14 @@ async def _get_mode(tenant_id: str, division_id: str) -> str:
     mode = await _fetch_mode(tenant_id, division_id)
     _settings_cache[key] = (now, mode)
     return mode
+
+
+async def get_mode(*, tenant_id: str, division_id: str) -> str:
+    """Wrapper público de `_get_mode` (S1-12, `ContextBar` del chat quiere
+    mostrar el modo DLP activo sin analizar ningún prompt) — misma caché,
+    mismo fail-closed a `block` sin fila de `dlp_settings`, cero lógica
+    duplicada."""
+    return await _get_mode(tenant_id, division_id)
 
 
 async def _get_dictionary_terms(tenant_id: str, division_id: str) -> dict[str, list[str]]:

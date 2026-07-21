@@ -1,16 +1,17 @@
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from app.config import settings
 from app.db import engine
-from app.services import dlp
+from app.services import dlp, gateway, ledger
 from app.services.auth import (
     AuthenticatedIdentity,
     CurrentUser,
@@ -29,7 +30,7 @@ from app.services.onboarding import (
     set_dlp_preset,
     validate_and_store_key,
 )
-from app.services.policy import PolicyDeniedError
+from app.services.policy import PolicyDeniedError, get_chat_context, list_visible_models
 from app.services.policy import check as policy_check
 from app.services.tenant_resolver import (
     TenantNotFoundError,
@@ -43,6 +44,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # Carga spaCy es_core_news_md (1-3s, SP-2 docs/spike.md) — irrelevante
     # una vez en el arranque, inaceptable si se hiciera por request.
     dlp.init_engine()
+    # Reconciliación de holds huérfanos (S1-11): un proceso recién
+    # arrancado no puede tener streams propios en vuelo, así que cualquier
+    # reserved_amount > 0 es basura de una instancia anterior que murió a
+    # mitad de un hold. Asume instancia única — ver docstring en
+    # app/services/ledger/__init__.py y la nota junto a D4 en
+    # docs/ARQUITECTURA.md.
+    await ledger.reset_orphaned_holds()
     yield
 
 
@@ -298,4 +306,112 @@ async def dlp_analyze_endpoint(
         "verdict": result.verdict,
         "masked_text": result.masked_text,
         "entities_summary": result.entities_summary,
+    }
+
+
+# --- GatewayService (S1-10) ---
+
+
+class ChatStreamRequest(BaseModel):
+    model_id: str
+    message: str
+    conversation_id: str | None = None  # None -> se crea una conversación nueva
+    confirm_masked: bool = False
+    max_tokens: int = 1024  # acotado a gateway.MAX_TOKENS_CEILING
+
+
+@app.post("/api/chat/stream")
+async def chat_stream_endpoint(
+    payload: ChatStreamRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Pipeline completo de docs/ARQUITECTURA.md: policy → DLP → hold →
+    litellm streaming → transacción final. `prepare_stream` resuelve las
+    validaciones previas de forma síncrona (no generador) para poder
+    devolver 403/409/422 reales; solo se entra al streaming (200 + SSE) si
+    las cuatro pasan."""
+    try:
+        prepared = await gateway.prepare_stream(
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+            role=current_user.role,
+            division_id=current_user.division_id,
+            model_id=payload.model_id,
+            prompt=payload.message,
+            conversation_id=payload.conversation_id,
+            confirm_masked=payload.confirm_masked,
+            requested_max_tokens=payload.max_tokens,
+        )
+    except PolicyDeniedError as e:
+        return JSONResponse(status_code=403, content={"reason": e.reason, "detail": e.detail})
+    except gateway.DLPBlockedError as e:
+        return JSONResponse(
+            status_code=422, content={"verdict": "blocked", "entities_summary": e.entities_summary}
+        )
+    except gateway.DLPMaskedError as e:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "verdict": "masked",
+                "masked_text": e.masked_text,
+                "entities_summary": e.entities_summary,
+            },
+        )
+
+    return StreamingResponse(gateway.stream_chat(prepared), media_type="text/event-stream")
+
+
+# --- Soporte de Chat UI (S1-12) ---
+
+
+@app.get("/api/me")
+async def me_endpoint(current_user: CurrentUser = Depends(get_current_user)):
+    """Lectura pura de la identidad ya resuelta — a diferencia de
+    `/api/auth/login`, NO escribe `audit_event` (no es un login real,
+    solo hidratar `/chat` en cada carga; resuelve el TODO dejado en
+    `frontend/app/login/page.tsx`)."""
+    return {
+        "user_id": current_user.id,
+        "tenant_id": current_user.tenant_id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "role": current_user.role,
+        "division_id": current_user.division_id,
+    }
+
+
+@app.get("/api/chat/models")
+async def chat_models_endpoint(current_user: CurrentUser = Depends(get_current_user)):
+    """Modelos habilitados para el tenant, agrupables por proveedor, con
+    precio y `allowed` por rol — ModelSelector del chat (S1-12)."""
+    models = await list_visible_models(tenant_id=current_user.tenant_id, role=current_user.role)
+    return {"models": [asdict(m) for m in models]}
+
+
+@app.get("/api/chat/context")
+async def chat_context_endpoint(
+    request: Request, current_user: CurrentUser = Depends(get_current_user)
+):
+    """División, saldo/presupuesto y modo DLP activo — ContextBar del
+    chat (S1-12). `billing_mode` sale de `request.state.tenant` (ya
+    resuelto por TenantResolver), sin query aparte."""
+    tenant = request.state.tenant
+    context = await get_chat_context(
+        tenant_id=current_user.tenant_id,
+        division_id=current_user.division_id,
+        billing_mode=tenant.billing_mode,
+    )
+    return {
+        "division_name": context.division_name,
+        "billing_mode": context.billing_mode,
+        "dlp_mode": context.dlp_mode,
+        "wallet_available": str(context.wallet_available)
+        if context.wallet_available is not None
+        else None,
+        "division_allocated": str(context.division_allocated)
+        if context.division_allocated is not None
+        else None,
+        "division_consumed": str(context.division_consumed)
+        if context.division_consumed is not None
+        else None,
     }

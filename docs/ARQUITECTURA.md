@@ -18,6 +18,18 @@ Gateway white-label multitenant a modelos de IA externos. Dos modos comerciales 
      masked  → si no llega confirm_masked=true: 409 con versión enmascarada
                (UI muestra "Enviar enmascarado / Editar"); NO se llama al proveedor
      blocked → 422 + audit_event + fila en requests con status blocked_dlp
+
+   Regla interno/externo (S1-10, aclarada en revisión — dos destinos, dos
+   reglas distintas): con veredicto `masked` y `confirm_masked=true`, hacia
+   el proveedor externo SIEMPRE viaja la versión enmascarada — el prompt
+   original JAMÁS sale de nuestra infraestructura. Lo que se persiste en
+   `messages.content` (protegido por RLS, sujeto además al flag
+   `log_full_prompts` de la división) es SIEMPRE el original: es
+   almacenamiento interno nuestro, no un envío a un tercero, y D1 solo
+   gobierna el on/off de guardar contenido, no qué versión. Por el mismo
+   motivo, `audit_events.subject` nunca lleva texto de prompt; si algún día
+   se añadiera un fragmento de contexto ahí, tendría que ser siempre la
+   versión enmascarada.
 4. Hold de créditos (solo reseller): fila de hold en Postgres con expiración +
    SELECT ... FOR UPDATE sobre el wallet al apuntar. Evita carreras de saldo.
 5. GatewayService.stream() → chunks SSE al cliente
@@ -72,6 +84,20 @@ es el usage exacto devuelto por el proveedor.
   SIN Docker local y SIN Redis en F1: holds de créditos con SELECT ... FOR UPDATE
   sobre wallets y rate limiting con contadores en Postgres. Redis (Upstash/Railway)
   solo si el volumen lo pide.
+
+  **Nota S1-11 — asume instancia única.** `reserved_amount` en `wallets` es un
+  contador agregado, sin tabla de holds por fila — si el proceso muere (crash,
+  deploy) con un stream en vuelo, ese hold queda huérfano para siempre, porque no
+  hay fila propia que expirar. `ledger.reset_orphaned_holds()` (llamada en el
+  lifespan de `main.py`, junto a `dlp.init_engine()`) resetea `reserved_amount` a
+  0 en todos los wallets al arrancar — correcto porque un proceso recién nacido no
+  puede tener streams propios en vuelo. Esto asume Railway sin autoscaling
+  (instancia única, cierto en F1): con más de una instancia corriendo a la vez, el
+  arranque de una NO implica que las demás no tengan streams en curso, y este
+  reset las pisaría con holds legítimos. **Escalar a múltiples instancias exige
+  antes migrar a una tabla de holds por fila con TTL/expiración propia** — el
+  "job de limpieza de holds expirados" que S2-8 mencionaba originalmente ya no
+  aplica en F1 con este mecanismo (ver `docs/BACKLOG.md`, S2-8).
 - **D5 auth**: Supabase Auth (email/password + Google). El backend verifica el JWT
   de Supabase; nuestras tablas users/memberships mapean auth.users → tenant/rol.
 - **D6 thinking en catálogo (post-spike SP-1)**: varios modelos actuales tienen

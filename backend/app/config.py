@@ -15,5 +15,11 @@ class Settings(BaseSettings):
     app_master_key: str
     base_domain: str = "lvh.me"
 
+    # Keys master de proveedores (modo reseller, GatewayService S1-10) —
+    # opcionales porque un tenant puede operar solo en BYOK.
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    gemini_api_key: str | None = None
+
 
 settings = Settings()

@@ -240,21 +240,220 @@ DoD global: `alembic upgrade head` limpio · `pytest` verde · `npm run typechec
       y el endpoint HTTP), `ruff check`/`ruff format --check` limpios, y arranque
       real de `uvicorn` (no solo los tests, que no disparan el lifespan de FastAPI
       con `ASGITransport`) para confirmar que `init_engine()` no rompe el startup.
-- [ ] **S1-10 · GatewayService + streaming.** POST /api/chat/stream (SSE) con el pipeline
+- [x] **S1-10 · GatewayService + streaming.** POST /api/chat/stream (SSE) con el pipeline
       completo de @docs/ARQUITECTURA.md: policy → DLP (409 masked / 422 blocked) → hold
       de créditos en Postgres (reseller) → stream con litellm.acompletion → transacción
       final (metering con usage real + ledger + requests + audit) → último evento con
       credits_charged y saldo.
       AC: provider_error a mitad de stream no deja hold huérfano ni cobra sin usage.
-- [ ] **S1-11 · Metering + Ledger.** Exchange rate vigente por (model, unit) en el momento
+      Dos fases en `app/services/gateway/` para poder devolver códigos HTTP reales antes
+      de comprometer la respuesta a streaming: `prepare_stream()` (función normal, no
+      generador) resuelve policy → DLP → hold y lanza excepción si algo falla — el
+      endpoint las traduce a 403/409/422 ANTES de crear el `StreamingResponse`; solo
+      entonces arranca `stream_chat()` (el generador SSE real). Sin `sse-starlette` en
+      el proyecto: formato `data: {json}\n\n` a mano.
+      **Regla interno/externo (aclarada en revisión de este ticket, ahora también en
+      `docs/ARQUITECTURA.md`)**: con veredicto `masked` y `confirm_masked=true`, hacia
+      el proveedor externo SIEMPRE viaja `masked_text` — el original jamás sale de
+      nuestra infraestructura. Lo persistido en `messages.content` (RLS + flag
+      `log_full_prompts` de la división) es SIEMPRE el original — son dos destinos con
+      reglas distintas. `audit_events.subject` nunca lleva texto de prompt.
+      Arrancados `app/services/ledger/` y `app/services/metering/` (vacíos hasta ahora):
+      lo mínimo para que S1-10 funcione correctamente bajo concurrencia
+      (`SELECT ... FOR UPDATE` sobre `wallets` antes de crear/liberar hold o registrar
+      consumo, regla 5 de CLAUDE.md — nunca INSERT/UPDATE directo desde otro servicio).
+      S1-11 es quien añade el test de carrera dedicado y puede endurecer esta base.
+      Decisiones propias documentadas en el código (sin AC explícito en el backlog):
+      estimación del hold en dos tramos con la tarifa que corresponde a cada uno
+      (`1k_tokens_in` para el prompt, `1k_tokens_out` para `max_tokens` — la de salida
+      es la cara); `exchange_rate_id` de `requests`/`ledger_entries` referencia la fila
+      `1k_tokens_in` como puntero informativo de "qué versión de tarifa estaba vigente"
+      (el cálculo real usa ambas filas, el esquema solo permite un FK único);
+      `conversation_id` ausente → se crea la conversación al completar con éxito
+      (título = primeros ~60 caracteres del prompt original), nunca en el camino de
+      error. D6 (thinking sin límite) resuelto en código, no en esquema: mapeo mínimo
+      por proveedor (`reasoning_effort=disable` para Gemini, hallazgo del spike SP-1).
+      **Hallazgo de seguridad real, corregido en el camino** (no introducido por este
+      ticket, pero expuesto por su test de logging): Presidio, en DEBUG, logueaba el
+      texto original del prompt vía su logger interno (`lemma_context_aware_enhancer`,
+      contexto de entidades) — nada que ver con el logging propio de la app, pero un
+      leak real si alguna vez se sube el logging raíz a DEBUG. Corregido en
+      `dlp.init_engine()` (S1-9): loggers `presidio-analyzer`/`presidio-anonymizer`
+      fijados a WARNING de forma explícita, independiente de la config de logging raíz.
+      Verificado: `pytest` 47/47 en verde (8 tests nuevos en `test_gateway.py`, incluye
+      feliz reseller, masked sin confirmar, masked confirmado con captura del texto que
+      recibe litellm, blocked, no_balance por hold antes de llamar al proveedor, BYOK
+      sin tocar el ledger, provider_error a mitad de stream con hold liberado y sin
+      cobro, y el test de logging de la regla 3), `ruff check`/`ruff format --check`
+      limpios en todos los archivos tocados, `alembic upgrade head` sin cambios (el
+      esquema de S1-2 ya cubría todo lo necesario, ninguna migración nueva), arranque
+      real de `uvicorn` con `/health` respondiendo. **Gap preexistente detectado, fuera
+      de scope** (no tocado): `backend/app/services/onboarding/__init__.py:301` tiene
+      una línea de 101 caracteres que `ruff check` marca en el repo completo — no es de
+      este ticket, no se ha modificado ese archivo.
+- [x] **S1-11 · Metering + Ledger.** Exchange rate vigente por (model, unit) en el momento
       del request; apunte consumption con credits_delta, provider_cost_eur, balance_after.
       AC: dos consumos concurrentes no dejan balance_cached inconsistente (test de carrera).
-- [ ] **S1-12 · Chat UI.** /chat con ChatWindow (streaming SSE), MessageBubble con
+      Endurecimiento de lo mínimo que dejó S1-10 (ambos servicios ya existían, funcionales
+      pero sin el test de carrera dedicado ni varios gaps anotados en el código/docs).
+      **Carrera real** (`tests/test_ledger.py`): N=10 peticiones concurrentes contra el
+      mismo wallet con saldo para K=4 (K calculado con `gateway._estimate_hold` real, no
+      a ojo). Diseñada en DOS oleadas deliberadas, no una carrera de punta a punta: el
+      hold es conservador por diseño (cubre `max_tokens` de salida) y el cobro real es
+      bastante menor, así que un flujo que TERMINA libera más margen del que ocupó — un
+      intento tardío puede colarse aprovechando ese margen (comportamiento correcto,
+      pero no determinista si se deja mezclado con el resto del flujo). La oleada 1
+      dispara las N reservas de hold concurrentes contra el MISMO saldo inicial (ahí está
+      la contención real, con `SELECT ... FOR UPDATE`), la oleada 2 completa los K
+      flujos admitidos sin más contención. Verificado: exactamente K completan, N−K
+      deniegan por `no_balance`, nunca se sobregira, `reserved_amount` vuelve a 0,
+      `ledger.check_integrity()` no reporta divergencias.
+      **`ledger.check_integrity()`** (nueva, reutilizable): compara `wallets.
+      balance_cached` contra `SUM(ledger_entries.credits_delta)` por wallet — con
+      `tenant_id` (como en el test) o sin argumentos (recorre todos los tenants, listos
+      para el cron de S2-8). Nunca bypassrls, ni para esto: recorre `tenants` (`[global]`,
+      sin RLS) y abre su propia `tenant_session` por tenant. Alcance explícito: solo
+      `balance_cached` vs ledger: `reserved_amount` no tiene un ledger propio con el que
+      compararlo, documentado como problema distinto (fuera de este ticket).
+      **`balance_after` bajo concurrencia**: investigado y corregido, no solo
+      documentado. `ledger_entries.ts` con `DEFAULT now()` captura la hora de INICIO de
+      la transacción, no la del INSERT — bajo carga real, el orden de `now()` puede no
+      coincidir con el orden real en que las transacciones adquieren el lock de
+      `lock_wallet` y confirman (`balance_after` en sí siempre es correcto, calculado ya
+      dentro de la sección serializada por el lock; el riesgo es solo al ORDENAR por
+      `ts`). Fix de una línea en `ledger.record_consumption()`: `ts = clock_timestamp()`
+      explícito en el INSERT en vez del `DEFAULT` de la columna — sin migración.
+      Verificado con `ORDER BY ts, id` (id como desempate, UUID v7) tras la carrera:
+      cada `balance_after` es exactamente el anterior más su propio `credits_delta`.
+      **`current_rates()` fail-closed**: ya fallaba cerrado desde S1-10 (nunca NULL
+      silencioso); sustituido el `KeyError` genérico por `MissingExchangeRateError`
+      propia, localizable. **Gap real detectado al revisar esto**: si `current_rates()`
+      (o cualquier otro paso de `_finalize_success`) fallaba DESPUÉS de que el streaming
+      ya completó con éxito, la excepción se propagaba sin control fuera del generador
+      de `gateway.stream_chat()` — hold huérfano, sin evento SSE de error limpio (el
+      único try/except de `stream_chat()` cubría la llamada a litellm, no la
+      finalización). Corregido: `_finalize_success(...)` ahora tiene su propio
+      try/except dentro del generador; cualquier fallo ahí se trata igual que un
+      `provider_error` real (`_finalize_provider_error()`, que a su vez libera el hold
+      en su propio try/except — best-effort, para que un fallo incluso EN la limpieza
+      no deje el generador colgado). Cubierto por un test nuevo en `test_gateway.py`
+      que mockea `metering.current_rates` para fallar solo en su segunda llamada (la de
+      finalización, no la de estimación del hold).
+      **Decisión documentada, no un gap abierto**: `docs/ARQUITECTURA.md` (línea junto a
+      la regla fail-closed) dejaba abierto si convenía un `status` propio en `requests`
+      para distinguir provider_error real de fail-closed-sin-usage. Decisión: NO —
+      evita una migración sin necesidad de producto documentada (YAGNI, mismo criterio
+      que otras decisiones del proyecto); con el endurecimiento de arriba las tres
+      causas ya comparten tratamiento uniforme y se pueden distinguir por
+      `audit_events.subject` si algún día hace falta en métricas.
+      **Verificado, sin cambio de código**: el hallazgo 2 del spike SP-1 (tokens de
+      "thinking" son coste real) — `usage.completion_tokens` (capturado como
+      `tokens_out`) YA incluye los tokens de razonamiento en el esquema que litellm
+      normaliza (desglose DENTRO de `completion_tokens`, no una cifra aparte); ya se
+      factura bien sin tocar nada. Nota dejada en `metering/__init__.py` para que nadie
+      "arregle" esto sin evidencia nueva.
+      **Hold huérfano por caída de proceso** (gap detectado en revisión del plan, no
+      parte del pedido original): `reserved_amount` es un contador agregado sin tabla de
+      holds por fila — si el proceso muere con un stream en vuelo, ese hold queda
+      sumado para siempre, y el "job de limpieza de holds expirados" que S2-8 prometía
+      no se podía construir sobre este diseño (no hay fila que expirar). Resuelto para
+      F1 con `ledger.reset_orphaned_holds()`: reconciliación al arranque (lifespan de
+      `main.py`, junto a `dlp.init_engine()`) que resetea `reserved_amount` a 0 en todos
+      los wallets — correcto porque un proceso recién nacido no puede tener streams
+      propios en vuelo. **Asume instancia única** (cierto en F1/Railway sin
+      autoscaling) — documentado explícitamente en el código y junto a D4 en
+      `docs/ARQUITECTURA.md`; escalar a múltiples instancias exige antes migrar a una
+      tabla de holds por fila con TTL. Alcance de S2-8 actualizado para retirar esa
+      limpieza (ya no aplica en F1) y anotar que escalar es lo que la reintroduciría.
+      **Encontrado y corregido durante la verificación** (no en el plan original):
+      arranque real de `uvicorn` con los ~75 tenants ya acumulados en la BD de
+      desarrollo tardó ~20-25 s solo en `reset_orphaned_holds()` (un round-trip de red
+      al pooler de Supabase por tenant, secuencial). Paralelizado (`asyncio.gather`,
+      acotado a 8 concurrentes para no agotar el pool del engine — mismo tratamiento
+      aplicado a `check_integrity()` por consistencia) — arranque real bajó a ~14 s.
+      Documentado en el docstring como algo a revisar de nuevo si el número de tenants
+      llega a los miles.
+      Verificado: `pytest` 55/55 en verde (7 tests nuevos en `test_ledger.py` +
+      `test_metering.py`, 1 test nuevo en `test_gateway.py`), `ruff check`/`format
+      --check` limpios en todo lo tocado, `alembic upgrade head` sin cambios (ninguna
+      migración nueva), arranque real de `uvicorn` cronometrado antes y después del
+      fix de paralelización, carrera repetida 3 veces seguidas sin flakiness.
+- [x] **S1-12 · Chat UI.** /chat con ChatWindow (streaming SSE), MessageBubble con
       `modelo · coste en créditos`, ChatInput, ModelSelector (agrupado por proveedor,
       precio /1K, "Solo admins" deshabilitado), ContextBar (División · Créditos
       usados/asignados · DLP activo, actualizada por el último evento SSE),
       DLPInterstitial (409: texto enmascarado con marks + Enviar enmascarado/Editar)
       y pantalla de bloqueo (422). Todo con design tokens, cero colores hardcodeados.
+      **No solo frontend**: `frontend/app/login/page.tsx` tenía un TODO explícito
+      ("guardar el perfil resuelto en el estado de la app") y ni "modelos
+      habilitados con proveedor+precio+min_role" ni "contexto de división
+      (créditos, DLP activo)" tenían un endpoint que los sirviera combinados.
+      Tres GET nuevos, de solo lectura, sin migración: `GET /api/me` (identidad
+      resuelta sin side-effect de audit_event, a diferencia de `/api/auth/login`),
+      `GET /api/chat/models` (`policy.list_visible_models`, JOIN
+      `tenant_model_access`+`models`+`providers`+`exchange_rates` acotado al
+      tenant, con `allowed` por rol) y `GET /api/chat/context`
+      (`policy.get_chat_context`: división, saldo, presupuesto del periodo, modo
+      DLP). Refactor mínimo en `policy.py`: `is_role_sufficient(role, min_role)`
+      extraída de `check()` — única fuente de verdad del ranking de roles,
+      reusada por `list_visible_models`. `dlp.get_mode()` nuevo wrapper público
+      de `_get_mode` (S1-9) para leer el modo DLP sin analizar ningún prompt.
+      **Regla interno/externo verificada de punta a punta en vivo** (no solo por
+      código): con DLP en modo mask, el modelo real respondió citando
+      literalmente `<PERSONA_1>`/`<EMAIL_1>` (confirma que lo enviado al
+      proveedor fue el texto enmascarado), mientras que `messages.content`
+      guardó el prompt original — exactamente la regla fijada en S1-10.
+      Componentes nuevos en `frontend/components/` (plano, sin subcarpeta
+      `chat/` — sin precedente en el repo): `ChatWindow`, `MessageBubble`,
+      `ChatInput`, `ModelSelector`, `ContextBar`, `DLPInterstitial`,
+      `DLPBlockedBanner`. `frontend/lib/sse.ts` nuevo: parser SSE a mano sobre
+      `response.body` (`EventSource` no sirve con POST+headers), sin dependencia
+      npm nueva — simétrico al `data: {json}\n\n` que ya emite `gateway._sse()`.
+      Ruta `frontend/app/(app)/chat/` nueva (grupo `(app)` vacío hasta ahora,
+      pensado para que S2-x añada admin ahí). **Sin `/chat/[id]`**: no hay
+      endpoint de historial ni se pidió — cada carga de `/chat` empieza
+      conversación nueva, la continuidad es solo vía el `conversation_id` que
+      devuelve el evento `done`, dentro de la misma sesión de navegador.
+      `ModelSelector` muestra "requiere rol {min_role real}" en vez del "Solo
+      admins" literal del ticket — `min_role` puede ser cualquiera de los
+      cuatro roles, no solo admin, y un texto fijo mentiría en los otros casos.
+      **Bug real encontrado y corregido en la verificación** (no un artefacto
+      del entorno de prueba): `crypto.randomUUID()` exige un contexto seguro
+      (HTTPS o `localhost`) — la convención de dev del proyecto,
+      `http://<slug>.lvh.me:3000`, NO lo es (aunque resuelva a loopback), así
+      que cualquier envío real en dev habría reventado con
+      `crypto.randomUUID is not a function`. Sustituido por un generador de IDs
+      simple (`Date.now()` + contador) — estos IDs solo sirven para `key` de
+      React, no hace falta que sean criptográficamente aleatorios.
+      **Verificación en navegador**: Playwright con Chromium limpio (sin perfil
+      de usuario ni extensiones) en vez de Claude in Chrome — el navegador
+      personal tiene la extensión Phantom Wallet, que marca `lvh.me` como
+      phishing (falso positivo con dominios `.me`) y la propia herramienta de
+      automatización bloqueaba la interacción con esa página de aviso; se optó
+      por no tocar la configuración de una extensión de seguridad del navegador
+      personal para pruebas de desarrollo. El signup real de Supabase seguía
+      bloqueado por el rate limit de email ya documentado (S2-8) — el
+      wizard/signup en sí ya se verificó en S1-7, así que para `/chat`
+      específicamente el tenant se aprovisionó directamente
+      (`register_tenant()` + JWT firmado con `SUPABASE_JWT_SECRET`, mismo
+      mecanismo que ya usan los tests de pytest) e inyectado como cookie de
+      sesión de Supabase (formato `sb-<project-ref>-auth-token`,
+      `base64-<base64url(JSON)>`, replicado desde `@supabase/ssr`) — sin
+      fabricar nada que el propio backend no acepte ya por diseño (`verify_jwt`
+      solo comprueba firma/claims, no que Supabase lo haya emitido de verdad).
+      De paso, un puerto 3000/3001 ya ocupados por servidores de OTROS
+      proyectos ajenos (no tocados) obligó a mover el frontend de verificación
+      a un puerto libre. Flujo real completo probado con dos tenants (DLP
+      mask y DLP block) contra Anthropic de verdad (`claude-haiku-4-5`,
+      prompts cortos, créditos reales descontados y verificados en
+      `ContextBar` tras cada mensaje): carga inicial, mensaje limpio
+      streaming, interstitial enmascarado + confirmación, restricción de
+      modelo por rol, y pantalla de bloqueo — capturas en el historial de la
+      sesión.
+      Verificado: `npm run typecheck`/`lint`/`build` limpios, `pytest` 55/55 en
+      verde, `ruff check`/`format --check` limpios (mismo lint preexistente y
+      ajeno en `onboarding/__init__.py:301`, no tocado), `alembic upgrade head`
+      sin cambios (sin migración nueva).
 
 **Demo fin S1:** registro → pegar key → check verde → chatear → el DLP enmascara un
 cliente → coste en créditos bajo la respuesta.
@@ -283,10 +482,27 @@ cliente → coste en créditos bajo la respuesta.
 - [ ] **S2-7 · Invitaciones.** Flujo completo: email con token, aceptar (alta en
       Supabase Auth si no existe), cae en su división y rol. Google login ya viene
       de S1-5 vía Supabase.
-- [ ] **S2-8 · Hardening + deploy Railway.** Job de integridad del ledger (SUM vs
-      balance_cached) y limpieza de holds expirados (cron de Railway o job interno),
-      rate limits afinados, headers de seguridad, test de que ninguna key aparece en
-      logs, y despliegue completo en Railway (backend + frontend) con dominio wildcard.
+- [ ] **S2-8 · Hardening + deploy Railway.** Job de integridad del ledger (cron
+      llamando a `ledger.check_integrity()`, ya construida en S1-11 — este ticket
+      solo la engancha a un cron y decide qué hacer con las divergencias que
+      reporte), rate limits afinados, headers de seguridad, test de que ninguna
+      key aparece en logs, y despliegue completo en Railway (backend + frontend)
+      con dominio wildcard.
+      ~~Limpieza de holds expirados~~ — retirado de este ticket: S1-11 resolvió
+      el caso de holds huérfanos por caída de proceso con una reconciliación al
+      arranque (`ledger.reset_orphaned_holds()`, ver nota junto a D4 en
+      `docs/ARQUITECTURA.md`), que asume instancia única (cierto en F1). Si algún
+      día se escala a múltiples instancias, ESE es el momento de reintroducir
+      un mecanismo de limpieza dedicado — pero sobre una tabla de holds por fila
+      con TTL, no sobre el contador agregado actual.
+      **Pendiente de revisar aquí**: coste de arranque de `reset_orphaned_holds`
+      con muchos tenants — ya paralelizado en S1-11 (`asyncio.gather`, tope de 8)
+      tras medir ~20-25 s en secuencial con ~75 tenants de prueba, pero sigue
+      siendo O(nº de tenants) en el camino crítico del arranque. Valorar mover a
+      una tarea de fondo post-startup (el proceso empieza a servir tráfico antes
+      de que termine la reconciliación) o documentar explícitamente como
+      excepción de mantenimiento aceptada a la escala de F1 — decisión pendiente,
+      no tomada todavía.
       **Reactivar "Confirm email" en Supabase Auth + configurar SMTP propio antes de
       usuarios reales** — se desactivó temporalmente en S1-5 solo para poder probar el
       ciclo signup→login en desarrollo (el proveedor de email por defecto de Supabase

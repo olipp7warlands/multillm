@@ -36,7 +36,8 @@ export default function LoginPage() {
       return;
     }
 
-    // TODO(S1-12): guardar el perfil resuelto (rol, división) en el estado de la app
+    // El perfil (rol, división) se resuelve en /chat vía GET /api/me
+    // (S1-12) — nada que guardar aquí.
     window.location.href = "/chat";
   }
 
